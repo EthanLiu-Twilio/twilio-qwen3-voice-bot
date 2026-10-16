@@ -109,6 +109,6 @@ PORT = int(os.environ.get("PORT", "8765"))
 # Welcome line for incoming calls ({name} can be replaced via customParameter, not enabled yet)
 WELCOME_TEXT = os.environ.get(
     "WELCOME_TEXT",
-    "音声アシスタントです。日本語、中国語、English に対応しています。"
-    "ご用件をお話しください。",
+    "This is a voice assistant. I speak Japanese, Chinese, and English. "
+    "How can I help you?",
 )

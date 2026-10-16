@@ -62,27 +62,35 @@ async def twiml(request: Request):
 
 async def _endpointing_loop(session: CallSession):
     """Poll for user turn end: in listening state, once VAD silence exceeds the
-    threshold and speech was accumulated -> finalize ASR and start a new turn."""
+    threshold and speech was accumulated -> finalize ASR and start a new turn.
+
+    Speech that began while the bot was still playing (pure echo) does not open
+    a turn; only speech that started after the echo window does."""
     last_voice_at = time.monotonic()
-    prev_state = STATE_LISTENING
     prev_voice_ms = 0.0
+    turn_open = False
     while not session._closed:
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
         state = session.state
         voice_ms = session.vad._voice_ms
         # Voice arrived since the last poll (works in every state, including
         # right after a barge-in flipped the state to LISTENING):
         if voice_ms > prev_voice_ms:
             last_voice_at = time.monotonic()
+            # Open a turn only when the voiced frame was outside the echo window
+            # (or the bot already stopped playing): echo_prefix < voiced means a
+            # clean speech frame arrived.
+            if (state == STATE_LISTENING
+                    and not turn_open
+                    and session.vad._echo_ms < session.vad._voice_ms):
+                turn_open = True
         prev_voice_ms = voice_ms
         if state != STATE_LISTENING:
-            prev_state = state
             continue
-        prev_state = state
         if voice_ms > 0:
             continue
         silence = time.monotonic() - last_voice_at
-        if silence > config.TURN_END_SILENCE_SEC + 0.5:
+        if turn_open and silence > config.TURN_END_SILENCE_SEC:
             logger.info("[%s] endpoint: silence=%.1fs, finalizing ASR",
                         session.stream_sid, silence)
             final = await session.asr.finalize()
@@ -94,6 +102,7 @@ async def _endpointing_loop(session: CallSession):
                 await asyncio.sleep(0)
             else:
                 logger.info("[%s] endpoint: ASR empty, no turn", session.stream_sid)
+            turn_open = False
             last_voice_at = time.monotonic()
 
 

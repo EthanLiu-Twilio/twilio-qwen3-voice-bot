@@ -98,6 +98,10 @@ ULAW_BYTES_PER_TICK = TWILIO_SAMPLE_RATE // 50  # 160
 # ---------------------------------------------------------------------------
 # While the bot is speaking, N ms of continuous speech energy counts as barge-in
 BARGE_IN_MS = int(os.environ.get("BARGE_IN_MS", "400"))
+# How long after the last outbound chunk inbound audio is still treated as the
+# bot's own echo (line/speaker echo + network tail). Barge-in and endpointing
+# ignore voiced frames inside this window.
+ECHO_TAIL_SEC = float(os.environ.get("ECHO_TAIL_SEC", "0.6"))
 # After the bot finishes, how long silence means the user is done (with ASR endpointing)
 TURN_END_SILENCE_SEC = float(os.environ.get("TURN_END_SILENCE_SEC", "0.8"))
 

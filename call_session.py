@@ -30,32 +30,49 @@ STATE_SPEAKING = "speaking"
 
 
 class EnergyVAD:
-    """Simple energy VAD: frames whose RMS exceeds the threshold count as speech."""
+    """Simple energy VAD: frames whose RMS exceeds the threshold count as speech.
+
+    Tracks two accumulators: total voiced time and the *echo-only* prefix of the
+    current utterance (voiced frames that arrived while the bot was still playing
+    its own audio, i.e. the line echo of the bot). A real barge-in must have
+    voiced time beyond the echo prefix.
+    """
 
     def __init__(self, threshold: float = 0.015):
         self.threshold = threshold
         self._voice_ms = 0.0
         self._silence_ms = 0.0
+        self._echo_ms = 0.0
 
-    def feed(self, pcm16k: bytes) -> tuple[bool, float]:
-        """Returns (is_speech, voiced_duration_ms)."""
+    def feed(self, pcm16k: bytes, echo_present: bool = False) -> tuple[bool, float, float]:
+        """Returns (is_speech, voiced_duration_ms, echo_prefix_ms)."""
         pcm = np.frombuffer(pcm16k, dtype=np.int16).astype(np.float32) / 32768.0
         if pcm.size == 0:
-            return self._voice_ms > 0, self._voice_ms
+            return self._voice_ms > 0, self._voice_ms, self._echo_ms
         rms = float(np.sqrt(np.mean(pcm ** 2)))
         frame_ms = len(pcm) / config.ASR_SAMPLE_RATE * 1000.0
         if rms > self.threshold:
+            if self._silence_ms > 300:  # utterance restart: reset both accumulators
+                self._voice_ms = 0.0
+                self._echo_ms = 0.0
             self._voice_ms += frame_ms
             self._silence_ms = 0.0
+            if echo_present:
+                self._echo_ms += frame_ms
+            else:
+                # clean (non-echo) speech arrived: the echo prefix is over
+                self._echo_ms = 0.0
         else:
             self._silence_ms += frame_ms
             if self._silence_ms > 300:  # brief pauses do not reset the speech accumulator
                 self._voice_ms = 0.0
-        return self._voice_ms > 0, self._voice_ms
+                self._echo_ms = 0.0
+        return self._voice_ms > 0, self._voice_ms, self._echo_ms
 
     def reset(self):
         self._voice_ms = 0.0
         self._silence_ms = 0.0
+        self._echo_ms = 0.0
 
 
 class CallSession:
@@ -74,6 +91,9 @@ class CallSession:
         self._turn_tasks: set[asyncio.Task] = set()
         self._last_activity = time.monotonic()
         self._closed = False
+        # Wall-clock deadline until which inbound audio is still the bot's own
+        # echo (outbound playback + tail). Used to gate barge-in and endpointing.
+        self._outbound_until = 0.0
 
     # -- Twilio send ------------------------------------------------------
 
@@ -115,24 +135,36 @@ class CallSession:
         """Twilio inbound audio (8kHz μ-law)."""
         if self._closed:
             return
-        self._last_activity = time.monotonic()
+        now = time.monotonic()
+        if self._last_activity < self._outbound_until and now >= self._outbound_until:
+            # Bot just stopped playing: the voice accumulated so far was the bot's
+            # own echo, not the user. Wipe both accumulators so the endpointing
+            # loop can't mistake the echo tail for a user turn.
+            self.vad.reset()
+        self._last_activity = now
         pcm16k = ulaw8k_to_pcm16_16k(ulaw)  # pure numpy, microseconds, no thread needed
-        is_speech, voiced_ms = self.vad.feed(pcm16k)
+        echo_present = self._last_activity < self._outbound_until
+        is_speech, voiced_ms, echo_ms = self.vad.feed(pcm16k, echo_present)
 
-        if self.state == STATE_SPEAKING and voiced_ms >= config.BARGE_IN_MS:
+        # Barge-in: voiced past the threshold AND sustained beyond what the
+        # bot's own echo could explain (echo prefix shorter than voiced time).
+        if (self.state == STATE_SPEAKING
+                and voiced_ms >= config.BARGE_IN_MS
+                and echo_ms < voiced_ms):
             await self._barge_in()
             return
         # Periodic VAD status log to debug "didn't hear anything" issues
         self._vad_log_at = getattr(self, "_vad_log_at", 0.0)
-        now = time.monotonic()
         if self.state == STATE_LISTENING and now - self._vad_log_at > 2.0:
             self._vad_log_at = now
             logger.debug("[%s] VAD voiced=%.0fms rms-chunk=%d",
                          self.stream_sid, voiced_ms, len(pcm16k))
 
-        if self.state == STATE_LISTENING:
-            # Don't feed ASR while speaking/thinking: keeps the bot's own voice out of history
-            await self.asr.feed(pcm16k)
+        # Always buffer into ASR: when the user barges in, the speech they spoke
+        # *during* playback must be recognized, not lost. The bot's own echo
+        # mixed into the buffer is handled by the echo-free re-buffer in
+        # _barge_in(); the buffer is also cleared on every turn finalize.
+        await self.asr.feed(pcm16k)
 
     async def on_mark(self, name: str):
         """Twilio confirms a mark finished playing (or replays unplayed marks after clear)."""
@@ -149,6 +181,16 @@ class CallSession:
 
     async def _barge_in(self):
         logger.info("[%s] barge-in, clearing buffer", self.stream_sid)
+        # Echo-free re-buffer: the ASR buffer currently holds the bot's own
+        # voice mixed with the user's interruption. Replace it with just the
+        # frames arriving from here on, so the turn that gets finalized after
+        # this barge-in contains only the user's speech.
+        await self.asr.reset()
+        # Echo deadline: inbound audio is still dominated by the bot's echo
+        # until the last already-streamed chunk has played out (+ tail).
+        # Barge-in won't re-fire inside this window; endpointing won't open a
+        # ghost turn from the echo tail.
+        self._outbound_until = time.monotonic() + config.ECHO_TAIL_SEC
         # _interrupted is owned by the speaking turn loop (on_user_turn):
         # it stops speak() loops and suppresses the history append. Do NOT
         # clear it here — clearing would let the interrupted turn resume
@@ -160,9 +202,9 @@ class CallSession:
         # the whole WebSocket.
         # Do NOT reset the VAD: the user is *currently speaking* — wiping the
         # accumulator loses the speech that is already buffered for ASR.
-        # Switch to LISTENING immediately: stop feeding the bot's own voice into
-        # ASR now (previously it polluted the user's transcript until the turn
-        # loop noticed the flag, e.g. "你好。你好，能听见吗？").
+        # Switch to LISTENING immediately: the endpointing loop starts tracking
+        # the user's turn right away (the echo re-buffer above keeps the bot's
+        # own voice out of the transcript, e.g. "你好。你好，能听见吗？").
         self.state = STATE_LISTENING
 
     # -- Speak -------------------------------------------------------------
@@ -181,6 +223,9 @@ class CallSession:
         self.state = STATE_SPEAKING
         self._interrupted = False  # new sentence starts, clear the stale interrupt flag
         t0 = time.monotonic()
+        # Inbound audio is the bot's own echo until the last scheduled chunk
+        # has played out (+ tail for network/jitter).
+        self._outbound_until = t0 + config.ECHO_TAIL_SEC
         sent = 0
         try:
             async for chunk in synthesize_stream(text):
@@ -206,6 +251,10 @@ class CallSession:
             logger.info("[%s] spoken %.1fs audio in %.1fs wall",
                         self.stream_sid, sent * 0.02, time.monotonic() - t0)
             self.vad.reset()
+        # Refine the echo deadline to the actual last chunk sent (early exit on
+        # barge-in would otherwise leave a stale far-future window).
+        self._outbound_until = max(t0 + sent * config.SEND_TICK_SEC, time.monotonic()) \
+            + config.ECHO_TAIL_SEC
 
     # -- Turn handling ---------------------------------------------------------
 

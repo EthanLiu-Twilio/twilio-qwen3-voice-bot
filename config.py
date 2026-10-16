@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Central configuration: environment variables + constants."""
+
+import os
+from pathlib import Path
+
+
+def _load_dotenv():
+    """Minimal .env loader (KEY=VALUE, # comments); never overrides existing env vars."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
+# ---------------------------------------------------------------------------
+# oMLX (LLM chat)
+# ---------------------------------------------------------------------------
+OMLX_BASE_URL = os.environ.get("OMLX_BASE_URL", "http://localhost:8000/v1")
+OMLX_API_KEY = os.environ.get("OMLX_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "Qwen3.8-Flash-Next-oQ4e-mtp")
+SYSTEM_PROMPT = os.environ.get(
+    "SYSTEM_PROMPT",
+    "你是一个电话语音助手，精通日语、普通话和英语。"
+    "始终使用用户最后一句话所使用的同一种语言回答（用户说日语就用日语、"
+    "说中文就用中文、说英语就用英语），不要主动切换语言。"
+    "回答要简短、口语化、自然，每次不超过三句话。"
+    "如果用户发音含糊，关键信息（地名、号码、事由）不确定时，"
+    "先用同一种语言反问确认，不要猜测。"
+    "不要使用 Markdown、列表或表情符号，因为回复会被转成语音朗读。",
+)
+
+# ---------------------------------------------------------------------------
+# oMLX audio models (TTS / ASR both served by oMLX over HTTP)
+# ---------------------------------------------------------------------------
+TTS_MODEL_ID = os.environ.get("TTS_MODEL_ID", "Qwen3-TTS-12Hz-1.7B-Base-fp32")
+ASR_MODEL_ID = os.environ.get("ASR_MODEL_ID", "Qwen3-ASR-1.7B-bf16")
+# Base TTS needs a reference audio for voice cloning (local wav path, auto base64-uploaded to oMLX)
+REF_AUDIO_PATH = os.environ.get("REF_AUDIO_PATH", "")
+REF_TEXT = os.environ.get("REF_TEXT", "")
+
+# TTS speed multiplier (1.0 = normal, >1 faster)
+TTS_SPEED = float(os.environ.get("TTS_SPEED", "1.15"))
+
+# Per-language reference audio: synthesize in the language whose native ref is
+# configured, to avoid cross-language accent contamination.
+# Languages left unset fall back to REF_AUDIO_PATH/REF_TEXT.
+REF_AUDIO_PATH_JA = os.environ.get("REF_AUDIO_PATH_JA", "")
+REF_TEXT_JA = os.environ.get("REF_TEXT_JA", "")
+REF_AUDIO_PATH_ZH = os.environ.get("REF_AUDIO_PATH_ZH", "")
+REF_TEXT_ZH = os.environ.get("REF_TEXT_ZH", "")
+REF_AUDIO_PATH_EN = os.environ.get("REF_AUDIO_PATH_EN", "")
+REF_TEXT_EN = os.environ.get("REF_TEXT_EN", "")
+
+REF_AUDIO_PATHS = {
+    "ja": REF_AUDIO_PATH_JA,
+    "zh": REF_AUDIO_PATH_ZH,
+    "en": REF_AUDIO_PATH_EN,
+}
+REF_TEXTS = {
+    "ja": REF_TEXT_JA,
+    "zh": REF_TEXT_ZH,
+    "en": REF_TEXT_EN,
+}
+
+# ASR tuning: auto = language detection (ja/zh/en mixed OK); can pin ja/zh/en
+ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "auto")
+ASR_PROMPT = os.environ.get(
+    "ASR_PROMPT",
+    "多语言电话会话，可能使用日语、普通话或英语。"
+    "中国、中華人民共和国、中学生、学生、先生、日本語、英語、"
+    "オーストラリア、メルボルン、東京、水道局、蛇口、止水栓、漏水、修理、予約、"
+    "電話番号、飛行機、ホテル。Hello, thank you, appointment, reservation.",
+)
+
+# ---------------------------------------------------------------------------
+# Audio format constants
+# ---------------------------------------------------------------------------
+TWILIO_SAMPLE_RATE = 8000          # Twilio Media Streams is fixed 8kHz μ-law
+ASR_SAMPLE_RATE = 16000            # mlx-qwen3-asr expects 16kHz
+TTS_SAMPLE_RATE = 24000            # mlx-audio qwen3_tts outputs 24kHz
+
+# Send pacing: one 160-byte μ-law block every 20ms (Twilio's recommended granularity)
+SEND_TICK_SEC = 0.02
+ULAW_BYTES_PER_TICK = TWILIO_SAMPLE_RATE // 50  # 160
+
+# ---------------------------------------------------------------------------
+# Dialog state machine / VAD
+# ---------------------------------------------------------------------------
+# While the bot is speaking, N ms of continuous speech energy counts as barge-in
+BARGE_IN_MS = int(os.environ.get("BARGE_IN_MS", "400"))
+# After the bot finishes, how long silence means the user is done (with ASR endpointing)
+TURN_END_SILENCE_SEC = float(os.environ.get("TURN_END_SILENCE_SEC", "0.8"))
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+PORT = int(os.environ.get("PORT", "8765"))
+
+# Welcome line for incoming calls ({name} can be replaced via customParameter, not enabled yet)
+WELCOME_TEXT = os.environ.get(
+    "WELCOME_TEXT",
+    "音声アシスタントです。日本語、中国語、English に対応しています。"
+    "ご用件をお話しください。",
+)

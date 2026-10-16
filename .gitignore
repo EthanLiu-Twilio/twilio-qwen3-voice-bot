@@ -1,0 +1,17 @@
+# Secrets — never commit. Use .env.example as the template.
+.env
+
+# Reference audio (real human voice recordings, not uploaded)
+ref_audios/
+*.wav
+*.m4a
+*.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS
+.DS_Store

@@ -18,7 +18,8 @@ phone dials → Twilio Media Streams → ngrok tunnel → local FastAPI (:8765)
 
 - **All AI inference runs locally on the Mac** (oMLX / MLX stack); Twilio only
   provides phone ingress and audio forwarding.
-- **Hardware:** developed on a 128GB M5 Max with all three models resident.
+- **Hardware:** developed on a 128GB M5 Max with all three models resident
+  (~85–90GB measured).
   Smaller-memory Macs work too, but must swap the chat LLM (default
   `Qwen3.8-Flash-Next-oQ4e-mtp`) for a smaller MLX model via `LLM_MODEL`
   (e.g. an 8B–14B Qwen3-class model); TTS + ASR together need ~10–15GB.

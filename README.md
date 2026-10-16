@@ -58,8 +58,8 @@ ngrok http 8765
 
 Put the ngrok `https://xxxx.ngrok-free.dev` URL into the Twilio console:
 Phone Number → Voice Configuration → **A Call Comes In** → `https://xxxx.ngrok-free.dev/twiml`.
-(Free-tier URLs end in `.ngrok-free.dev`; check ngrok's local API at
-`http://127.0.0.1:4040/api/tunnels` for the current one.)
+(Free-tier URLs end in `.ngrok-free.dev`; the current URL is shown in the
+ngrok terminal when the tunnel starts.)
 
 > When ngrok restarts with a new domain, update the Twilio webhook accordingly.
 

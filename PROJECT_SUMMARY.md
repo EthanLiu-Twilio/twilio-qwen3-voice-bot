@@ -25,7 +25,7 @@ phone dials → Twilio Media Streams → ngrok tunnel → local FastAPI (:8765)
   (e.g. an 8B–14B Qwen3-class model); TTS + ASR together need ~10–15GB.
 - Public ingress via ngrok free domain: `https://<your-random>.ngrok-free.dev`
   (free-tier URLs end in `.ngrok-free.dev`; the domain changes on every restart —
-  read it from ngrok's local API at `http://127.0.0.1:4040/api/tunnels`)
+  check your ngrok terminal or inspector for the current URL)
 - No cloud API fees, no data leaves the machine (except the Twilio phone channel itself).
 
 ## 2. Code Modules

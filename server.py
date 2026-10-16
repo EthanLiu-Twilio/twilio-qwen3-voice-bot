@@ -65,12 +65,23 @@ async def _endpointing_loop(session: CallSession):
     threshold and speech was accumulated -> finalize ASR and start a new turn."""
     last_voice_at = time.monotonic()
     had_speech = False
+    was_speaking = False
     while not session._closed:
         await asyncio.sleep(0.2)
         if session.state != STATE_LISTENING:
             last_voice_at = time.monotonic()
             had_speech = False
+            was_speaking = session.state == STATE_SPEAKING
             continue
+        if was_speaking:
+            # Just transitioned SPEAKING -> LISTENING (barge-in or natural end):
+            # the VAD already holds the interrupting speech; count it immediately
+            # instead of waiting out the full silence window.
+            was_speaking = False
+            if session.vad._voice_ms > 0:
+                had_speech = True
+                last_voice_at = time.monotonic()
+                continue
         if session.vad._voice_ms > 0:
             had_speech = True
             last_voice_at = time.monotonic()
@@ -84,6 +95,10 @@ async def _endpointing_loop(session: CallSession):
                         session.stream_sid, silence)
             final = await session.asr.finalize()
             if final.strip():
+                # Clear the barge-in flag *before* scheduling the turn:
+                # on_user_turn clears it on entry, so a clear-after would
+                # race and wipe the flag of a fresh barge-in mid-finalize.
+                session._interrupted = False
                 task = asyncio.create_task(session.handle_turn(final))
                 session._turn_tasks.add(task)
                 task.add_done_callback(session._turn_tasks.discard)

@@ -149,14 +149,21 @@ class CallSession:
 
     async def _barge_in(self):
         logger.info("[%s] barge-in, clearing buffer", self.stream_sid)
+        # _interrupted is owned by the speaking turn loop (on_user_turn):
+        # it stops speak() loops and suppresses the history append. Do NOT
+        # clear it here — clearing would let the interrupted turn resume
+        # sending the rest of its sentences.
         self._interrupted = True
         await self._send_clear()
-        # Don't switch state: the turn loop (on_user_turn) returns to LISTENING,
-        # so half-sentence ASR fragments don't trigger the LLM as full turns.
         # Don't cancel any task: speak / on_user_turn exit on their own via the
         # _interrupted flag; cancel would propagate through receive_text and kill
         # the whole WebSocket.
-        self.vad.reset()
+        # Do NOT reset the VAD: the user is *currently speaking* — wiping the
+        # accumulator loses the speech that is already buffered for ASR.
+        # Switch to LISTENING immediately: stop feeding the bot's own voice into
+        # ASR now (previously it polluted the user's transcript until the turn
+        # loop noticed the flag, e.g. "你好。你好，能听见吗？").
+        self.state = STATE_LISTENING
 
     # -- Speak -------------------------------------------------------------
 
@@ -191,12 +198,13 @@ class CallSession:
         except Exception:
             logger.exception("[%s] speak failed", self.stream_sid)
         finally:
+            # On barge-in, _barge_in() already switched to LISTENING; don't
+            # clobber it here (the interrupting speech must keep flowing to ASR).
             if self.state == STATE_SPEAKING and not self._closed:
                 self.state = STATE_LISTENING
         if not self._interrupted and not self._closed:
             logger.info("[%s] spoken %.1fs audio in %.1fs wall",
                         self.stream_sid, sent * 0.02, time.monotonic() - t0)
-            self.state = STATE_LISTENING
             self.vad.reset()
 
     # -- Turn handling ---------------------------------------------------------
@@ -218,6 +226,11 @@ class CallSession:
         if self.state == STATE_SPEAKING:
             logger.info("[%s] turn skipped (bot still speaking)", self.stream_sid)
             return
+        # Barge-in path: the user interrupted the previous reply; their speech
+        # since then is real and must be processed — clear the stale flag.
+        # (speak() clears it at the start of each sentence, so after the last
+        # sentence exits on the flag the value here is stale.)
+        self._interrupted = False
         # Prevent concurrent turns: if the previous turn is still winding down, wait for it (max 5s)
         # Note: the current task is itself in _turn_tasks; skip self
         cur = asyncio.current_task()
@@ -247,10 +260,15 @@ class CallSession:
             logger.exception("[%s] LLM failed", self.stream_sid)
             await self.speak("すみません、ただいま不具合が発生しています。しばらくしてからもう一度おかけ直しください。")
             return
-        if reply_buf and not self._interrupted:
-            self.history.append({"role": "assistant", "content": reply_buf})
         if not self._closed:
+            if self._interrupted:
+                # Barge-in: the user is speaking right now. Keep their buffered
+                # speech in ASR/VAD so the endpointing loop captures this new
+                # turn; don't reset and don't overwrite the state they set.
+                return
+            # Partial sentences spoken before an error still count as history.
+            if reply_buf:
+                self.history.append({"role": "assistant", "content": reply_buf})
             await self.asr.reset()
-            self._interrupted = False  # turn wrap-up: re-arm barge-in detection
             self.state = STATE_LISTENING
             self.vad.reset()

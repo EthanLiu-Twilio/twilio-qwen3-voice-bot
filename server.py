@@ -17,7 +17,7 @@ from fastapi.responses import Response
 import config
 from asr_engine import ASRSession
 from audio_codec import ulaw8k_to_pcm16_16k
-from call_session import CallSession, STATE_LISTENING
+from call_session import CallSession, STATE_LISTENING, STATE_SPEAKING
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,44 +64,34 @@ async def _endpointing_loop(session: CallSession):
     """Poll for user turn end: in listening state, once VAD silence exceeds the
     threshold and speech was accumulated -> finalize ASR and start a new turn."""
     last_voice_at = time.monotonic()
-    had_speech = False
-    was_speaking = False
+    prev_state = STATE_LISTENING
+    prev_voice_ms = 0.0
     while not session._closed:
         await asyncio.sleep(0.2)
-        if session.state != STATE_LISTENING:
+        state = session.state
+        voice_ms = session.vad._voice_ms
+        # Voice arrived since the last poll (works in every state, including
+        # right after a barge-in flipped the state to LISTENING):
+        if voice_ms > prev_voice_ms:
             last_voice_at = time.monotonic()
-            had_speech = False
-            was_speaking = session.state == STATE_SPEAKING
+        prev_voice_ms = voice_ms
+        if state != STATE_LISTENING:
+            prev_state = state
             continue
-        if was_speaking:
-            # Just transitioned SPEAKING -> LISTENING (barge-in or natural end):
-            # the VAD already holds the interrupting speech; count it immediately
-            # instead of waiting out the full silence window.
-            was_speaking = False
-            if session.vad._voice_ms > 0:
-                had_speech = True
-                last_voice_at = time.monotonic()
-                continue
-        if session.vad._voice_ms > 0:
-            had_speech = True
-            last_voice_at = time.monotonic()
+        prev_state = state
+        if voice_ms > 0:
             continue
-        # Already silent: speech was accumulated and silence exceeds the
-        # threshold (incl. ASR transcription buffer) -> turn end
         silence = time.monotonic() - last_voice_at
-        if had_speech and silence > config.TURN_END_SILENCE_SEC + 0.5:
-            had_speech = False
+        if silence > config.TURN_END_SILENCE_SEC + 0.5:
             logger.info("[%s] endpoint: silence=%.1fs, finalizing ASR",
                         session.stream_sid, silence)
             final = await session.asr.finalize()
             if final.strip():
-                # Clear the barge-in flag *before* scheduling the turn:
-                # on_user_turn clears it on entry, so a clear-after would
-                # race and wipe the flag of a fresh barge-in mid-finalize.
                 session._interrupted = False
                 task = asyncio.create_task(session.handle_turn(final))
                 session._turn_tasks.add(task)
                 task.add_done_callback(session._turn_tasks.discard)
+                await asyncio.sleep(0)
             else:
                 logger.info("[%s] endpoint: ASR empty, no turn", session.stream_sid)
             last_voice_at = time.monotonic()

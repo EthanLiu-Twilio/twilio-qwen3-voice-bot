@@ -24,6 +24,11 @@ phone ──call── Twilio ──wss── ngrok ──> server.py (:8765)
 
 ## Prerequisites
 
+**Hardware:** developed and validated on a 128GB Apple Silicon Mac (M5 Max) with
+oMLX keeping all three models resident (~30GB). On smaller Macs it can still run
+if you swap the chat LLM for a smaller one via `LLM_MODEL` (e.g. an 8B–14B
+Qwen3-class MLX model); the TTS + ASR pair needs roughly 10–15GB.
+
 1. **oMLX** running on `localhost:8000` with a working API key and these models (visible via `GET /v1/models`):
    - `Qwen3-TTS-12Hz-1.7B-Base-fp32` (TTS; the Base model needs ref_audio for voice cloning)
    - `Qwen3-ASR-1.7B-bf16` (ASR)
